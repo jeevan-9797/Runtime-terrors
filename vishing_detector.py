@@ -4,6 +4,12 @@ Real-time DSP Acoustic Vocoder Forensics & Semantic Coercion Engine
 """
 import os
 from typing import Dict, Optional, Tuple
+
+# Render / Cloud container optimization: enforce writable cache locations
+if os.name != "nt" or "RENDER" in os.environ:
+    os.environ.setdefault("HF_HOME", "/tmp/huggingface")
+    os.environ.setdefault("NUMBA_CACHE_DIR", "/tmp/numba_cache")
+
 import joblib
 import librosa
 import numpy as np
@@ -53,7 +59,10 @@ class VishingDetector:
         if use_whisper:
             try:
                 from faster_whisper import WhisperModel
-                threads = cpu_threads or min(8, os.cpu_count() or 4)
+                # In cloud/Render containers (or when WHISPER_THREADS is set), limit threads to 2
+                is_cloud = bool(os.getenv("RENDER") or os.getenv("PORT") or os.name != "nt")
+                default_threads = 2 if is_cloud else min(4, os.cpu_count() or 2)
+                threads = cpu_threads or int(os.getenv("WHISPER_THREADS", str(default_threads)))
                 self.whisper = WhisperModel(
                     whisper_model_size,
                     device="cpu",

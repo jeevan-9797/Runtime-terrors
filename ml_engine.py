@@ -23,6 +23,11 @@ import time
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
 
+# Render / Cloud container optimization: enforce writable cache locations
+if os.name != "nt" or "RENDER" in os.environ:
+    os.environ.setdefault("HF_HOME", "/tmp/huggingface")
+    os.environ.setdefault("NUMBA_CACHE_DIR", "/tmp/numba_cache")
+
 import numpy as np
 
 from config import settings
@@ -215,16 +220,28 @@ class MLEngineManager:
                     model_path = str(cand_dir)
 
             try:
+                # In cloud/Render containers (or when WHISPER_THREADS is set), limit threads to 2
+                is_cloud = bool(os.getenv("RENDER") or os.getenv("PORT") or os.name != "nt")
+                default_threads = 2 if is_cloud else min(4, os.cpu_count() or 2)
+                threads = int(os.getenv("WHISPER_THREADS", str(default_threads)))
+
                 try:
                     self._detector = real_detector_cls(
                         model_path=model_path,
                         use_whisper=True,
+                        cpu_threads=threads,
                     )
                 except TypeError:
                     try:
-                        self._detector = real_detector_cls(sample_rate=self.sample_rate)
+                        self._detector = real_detector_cls(
+                            model_path=model_path,
+                            use_whisper=True,
+                        )
                     except TypeError:
-                        self._detector = real_detector_cls()
+                        try:
+                            self._detector = real_detector_cls(sample_rate=self.sample_rate)
+                        except TypeError:
+                            self._detector = real_detector_cls()
 
                 self.mode = "real_ml"
                 self.weights_loaded = getattr(self._detector, "clf", None) is not None
@@ -232,7 +249,7 @@ class MLEngineManager:
 
                 print(
                     f"[ML Engine] Active engine mode: {self.mode} "
-                    f"(weights_loaded: {self.weights_loaded}, whisper_enabled: {self.whisper_enabled})"
+                    f"(weights_loaded: {self.weights_loaded}, whisper_enabled: {self.whisper_enabled}, threads: {threads})"
                 )
                 return
             except Exception as exc:
@@ -248,7 +265,8 @@ class MLEngineManager:
     def warmup(self) -> float:
         """
         Run a dummy 2-second 16kHz silent audio array through the detector.
-        Pre-compiles Librosa/Numba JIT methods and caches model weights into RAM.
+        Pre-compiles Librosa/Numba JIT methods and caches model weights into RAM,
+        then triggers gc.collect() to minimize container memory footprint.
         """
         dummy_audio = np.zeros(int(self.sample_rate * 2.0), dtype=np.float32)
         start_t = time.perf_counter()
@@ -259,14 +277,19 @@ class MLEngineManager:
             print(f"[ML Engine] Warmup warning: {exc}")
 
         self.warmup_latency_ms = round((time.perf_counter() - start_t) * 1000, 2)
-        print(f"[ML Engine] Warmup completed in {self.warmup_latency_ms}ms (mode: {self.mode})")
+        import gc
+        gc.collect()
+        print(
+            f"[ML Engine] Warmup completed in {self.warmup_latency_ms}ms "
+            f"(mode: {self.mode}), RAM freed with gc.collect()"
+        )
         return self.warmup_latency_ms
 
     async def analyze_window_safe(
         self,
         audio_np: np.ndarray,
         session_id: str,
-        timeout_sec: float = 2.5,
+        timeout_sec: float = 3.0,
     ) -> Tuple[Dict[str, Any], float]:
         """
         Run inference off the event loop with strict timeout guardrail (default 2.5s

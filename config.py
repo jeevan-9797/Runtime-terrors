@@ -18,12 +18,18 @@ _ENV_PATH = Path(__file__).resolve().parent / ".env"
 load_dotenv(_ENV_PATH)
 
 
+# Set cloud container cache paths if running in Linux or Render
+if os.name != "nt" or "RENDER" in os.environ:
+    os.environ.setdefault("HF_HOME", "/tmp/huggingface")
+    os.environ.setdefault("NUMBA_CACHE_DIR", "/tmp/numba_cache")
+
+
 class Settings:
     """Centralised, typed application settings."""
 
     # ── Server ────────────────────────────────────────────────────────
     HOST: str = os.getenv("KAVACH_HOST", "0.0.0.0")
-    PORT: int = int(os.getenv("KAVACH_PORT", "8000"))
+    PORT: int = int(os.getenv("PORT", os.getenv("KAVACH_PORT", "8000")))
     DEBUG: bool = os.getenv("KAVACH_DEBUG", "false").lower() in ("1", "true", "yes")
 
     # ── WebSocket telemetry ───────────────────────────────────────────

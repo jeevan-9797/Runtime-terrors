@@ -19,10 +19,16 @@ from __future__ import annotations
 
 import asyncio
 import json
+import os
 import random
 import time
 from contextlib import asynccontextmanager
 from typing import Dict, Set
+
+# Render / Cloud container optimization: enforce writable cache locations
+if os.name != "nt" or "RENDER" in os.environ:
+    os.environ.setdefault("HF_HOME", "/tmp/huggingface")
+    os.environ.setdefault("NUMBA_CACHE_DIR", "/tmp/numba_cache")
 
 from fastapi import FastAPI, WebSocket, WebSocketDisconnect
 from fastapi.middleware.cors import CORSMiddleware
@@ -644,9 +650,10 @@ async def call_stream(websocket: WebSocket, session_id: str):
 if __name__ == "__main__":
     import uvicorn
 
+    port = int(os.environ.get("PORT", str(settings.PORT)))
     uvicorn.run(
         "main:app",
-        host=settings.HOST,
-        port=settings.PORT,
+        host="0.0.0.0",
+        port=port,
         reload=settings.DEBUG,
     )
