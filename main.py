@@ -1,20 +1,18 @@
 """
-Kavach-VoIP — Phase 2 FastAPI backend.
+Kavach-VoIP — Phase 3 FastAPI backend.
 
 Provides:
-  GET  /health                         → server status + active WS count
-  WS   /ws/call-stream/{session_id}    → real-time audio analysis stream
+  GET   /health                              → server status + DB mode
+  GET   /api/sessions                        → recent call sessions
+  GET   /api/sessions/{session_id}/alerts    → full session detail + alerts
+  POST  /api/sessions/{session_id}/quarantine→ SOC kill-switch
+  WS    /ws/call-stream/{session_id}         → real-time audio analysis stream
 
-The WebSocket accepts:
-  • **binary frames** (raw 16-bit LE PCM) → fed into ``CallRingBuffer``;
-    every 0.5 s of new audio triggers ``VishingDetector.analyze_window()``
-    off the event loop via ``asyncio.to_thread()``.
-  • **text frames** (JSON commands) → ``SIMULATE_SAFE`` / ``SIMULATE_SCAM``
-    switch the fallback mock telemetry engine.
-
-When real audio is flowing, telemetry is driven by the detector pipeline.
-When no audio arrives, the Phase 1 mock engine emits synthetic frames every
-500 ms so the frontend never stalls.
+Phase 3 additions:
+  • Supabase persistence with automatic in-memory fallback.
+  • Non-blocking DB logging via asyncio.create_task(asyncio.to_thread(...)).
+  • Autonomous BLOCK_RTP_STREAM at overall_score >= 85.
+  • SOC quarantine endpoint that pushes CALL_TERMINATED to the live WebSocket.
 """
 
 from __future__ import annotations
@@ -24,13 +22,15 @@ import json
 import random
 import time
 from contextlib import asynccontextmanager
-from typing import Set
+from typing import Dict, Set
 
 from fastapi import FastAPI, WebSocket, WebSocketDisconnect
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.responses import JSONResponse
 
 from audio_buffer import CallRingBuffer
 from config import settings
+import database as db
 from detector_stub import VishingDetector
 from schemas import (
     AcousticMetrics,
@@ -48,6 +48,9 @@ from schemas import (
 # ═══════════════════════════════════════════════════════════════════════════
 
 _active_sessions: Set[str] = set()
+
+# Map session_id → live WebSocket so the quarantine endpoint can push events.
+_live_sockets: Dict[str, WebSocket] = {}
 
 # Single shared detector instance (stateless per-call, thread-safe).
 _detector = VishingDetector(sample_rate=16_000)
@@ -69,14 +72,13 @@ def _compute_composite_risk(
                              + 0.40 * coercion_score) * 100, 1)
 
     Thresholds:
-        < 40   → SAFE    / NONE
-        40-74  → WARNING / WARN_USER
-        >= 75  → CRITICAL / DROP_CALL_OR_ALERT
+        < 40   -> SAFE    / NONE
+        40-74  -> WARNING / WARN_USER
+        >= 75  -> CRITICAL / DROP_CALL_OR_ALERT
     """
     overall = round(
         (0.60 * synthetic_probability + 0.40 * coercion_score) * 100, 1
     )
-    # Clamp to [0, 100]
     overall = max(0.0, min(overall, 100.0))
 
     if overall >= 75:
@@ -102,7 +104,8 @@ def _compute_composite_risk(
 
 @asynccontextmanager
 async def _lifespan(app: FastAPI):
-    print("Kavach-VoIP backend starting (Phase 2) ...")
+    db_mode = "Supabase" if db.is_using_supabase() else "in-memory"
+    print(f"Kavach-VoIP backend starting (Phase 3) ... [DB: {db_mode}]")
     yield
     print("Kavach-VoIP backend shutting down ...")
 
@@ -113,8 +116,8 @@ async def _lifespan(app: FastAPI):
 
 app = FastAPI(
     title="Kavach-VoIP",
-    description="Real-time Deepfake Voice & Vishing Call Firewall — Phase 2",
-    version="0.2.0",
+    description="Real-time Deepfake Voice & Vishing Call Firewall — Phase 3",
+    version="0.3.0",
     lifespan=_lifespan,
 )
 
@@ -138,6 +141,54 @@ async def health():
         "service": "kavach-voip",
         "version": app.version,
         "active_sessions": len(_active_sessions),
+        "db_mode": "supabase" if db.is_using_supabase() else "in-memory",
+    }
+
+
+@app.get("/api/sessions")
+async def list_sessions(limit: int = 20):
+    """Return recent call sessions ordered by started_at descending."""
+    sessions = await asyncio.to_thread(db.get_recent_sessions, limit)
+    return {"sessions": sessions}
+
+
+@app.get("/api/sessions/{session_id}/alerts")
+async def session_alerts(session_id: str):
+    """Return full session info, all high-risk alerts, and firewall actions."""
+    details = await asyncio.to_thread(db.get_session_details, session_id)
+    return details
+
+
+@app.post("/api/sessions/{session_id}/quarantine")
+async def quarantine_session(session_id: str):
+    """
+    SOC kill-switch:
+      1. Log MANUAL_QUARANTINE_DROP in firewall_actions.
+      2. Mark the session QUARANTINED.
+      3. If a live WebSocket exists, push a CALL_TERMINATED event before
+         closing / freezing the stream.
+    """
+    await asyncio.to_thread(
+        db.quarantine_session, session_id, "MANUAL_SOC_KILLSWITCH"
+    )
+
+    # Push termination event to live WebSocket if connected.
+    ws = _live_sockets.get(session_id)
+    if ws is not None:
+        try:
+            await ws.send_text(json.dumps({
+                "event": "CALL_TERMINATED",
+                "session_id": session_id,
+                "action": "QUARANTINED_BY_SOC",
+            }))
+            await ws.close(code=1000, reason="QUARANTINED_BY_SOC")
+        except Exception:
+            pass  # Socket may already be closed.
+
+    return {
+        "status": "quarantined",
+        "session_id": session_id,
+        "action": "MANUAL_QUARANTINE_DROP",
     }
 
 
@@ -181,13 +232,7 @@ _SCAM_KEYWORDS_POOL: list[str] = [
 
 
 class _MockTelemetryEngine:
-    """
-    EMA-smoothed mock telemetry (Phase 1 fallback).
-
-    Used when:
-      • No binary audio is flowing (pure simulation mode).
-      • ``SIMULATE_SAFE`` / ``SIMULATE_SCAM`` text commands are sent.
-    """
+    """EMA-smoothed mock telemetry (Phase 1 fallback for simulation mode)."""
 
     _ALPHA = 0.25
 
@@ -195,7 +240,6 @@ class _MockTelemetryEngine:
         self.session_id = session_id
         self.chunk_id = 0
         self.mode: str = "safe"
-
         self._synth_prob = 0.08
         self._spectral_flat = 0.25
         self._pitch_jitter = 3.5
@@ -273,18 +317,16 @@ class _MockTelemetryEngine:
 @app.websocket("/ws/call-stream/{session_id}")
 async def call_stream(websocket: WebSocket, session_id: str):
     """
-    Bi-directional call-analysis stream.
+    Bi-directional call-analysis stream with DB logging.
 
-    **Inbound** (client -> server):
-      Binary frame  -> raw PCM-16 LE audio → ring buffer → detector
-      Text frame    -> JSON command (SIMULATE_SAFE / SIMULATE_SCAM)
-
-    **Outbound** (server -> client):
-      JSON ``TelemetryFrame`` driven by real audio analysis OR the mock
-      engine fallback (~500 ms cadence).
+    Lifecycle:
+      connect   → db.start_session()
+      each frame→ db.log_telemetry_if_risky()  (fire-and-forget task)
+      disconnect→ db.end_session()
     """
     await websocket.accept()
     _active_sessions.add(session_id)
+    _live_sockets[session_id] = websocket
 
     # Per-session state.
     ring = CallRingBuffer(
@@ -293,17 +335,24 @@ async def call_stream(websocket: WebSocket, session_id: str):
         stride_duration_sec=0.5,
     )
     mock_engine = _MockTelemetryEngine(session_id)
-    chunk_id = 0                    # shared counter across both paths
-    audio_active = False            # True once first binary frame arrives
+    chunk_id = 0
+    audio_active = False
 
     print(f"[+] Session connected: {session_id}")
 
+    # Register session in DB (non-blocking).
+    asyncio.create_task(asyncio.to_thread(db.start_session, session_id))
+
+    # ── Helper: log frame to DB (fire-and-forget) ─────────────────────
+    def _fire_and_forget_log(frame: TelemetryFrame) -> None:
+        """Schedule DB logging without awaiting — zero WS latency."""
+        frame_dict = json.loads(frame.model_dump_json())
+        asyncio.create_task(
+            asyncio.to_thread(db.log_telemetry_if_risky, frame_dict)
+        )
+
     # ── Background: mock-engine fallback loop ─────────────────────────
     async def _mock_fallback_loop():
-        """
-        Emit mock telemetry every 500 ms while no real audio is flowing.
-        Automatically pauses when ``audio_active`` is set.
-        """
         nonlocal chunk_id
         try:
             while True:
@@ -312,6 +361,7 @@ async def call_stream(websocket: WebSocket, session_id: str):
                     mock_engine.chunk_id = chunk_id
                     frame = mock_engine.next_frame()
                     await websocket.send_text(frame.model_dump_json())
+                    _fire_and_forget_log(frame)
                 await asyncio.sleep(settings.TELEMETRY_INTERVAL_SEC)
         except asyncio.CancelledError:
             pass
@@ -329,17 +379,14 @@ async def call_stream(websocket: WebSocket, session_id: str):
 
                 ring.append_pcm16_bytes(raw)
 
-                # Check if the stride boundary was crossed.
                 window = ring.pop_window_if_ready()
                 if window is not None:
-                    # Run the (potentially heavy) detector off the event loop.
                     result = await asyncio.to_thread(
                         _detector.analyze_window, window, session_id
                     )
 
                     chunk_id += 1
 
-                    # Unpack detector output.
                     am = result["acoustic_metrics"]
                     sm = result["semantic_metrics"]
 
@@ -357,6 +404,7 @@ async def call_stream(websocket: WebSocket, session_id: str):
                         composite_risk=risk,
                     )
                     await websocket.send_text(frame.model_dump_json())
+                    _fire_and_forget_log(frame)
 
             # ── Text: JSON command ────────────────────────────────────
             elif "text" in message and message["text"]:
@@ -383,10 +431,15 @@ async def call_stream(websocket: WebSocket, session_id: str):
 
     except WebSocketDisconnect:
         pass
+    except Exception as exc:
+        print(f"[WS] Session {session_id} ended: {exc}")
     finally:
         fallback_task.cancel()
         _active_sessions.discard(session_id)
+        _live_sockets.pop(session_id, None)
         ring.reset()
+        # End session in DB (non-blocking).
+        asyncio.create_task(asyncio.to_thread(db.end_session, session_id))
         print(f"[-] Session disconnected: {session_id}")
 
 
