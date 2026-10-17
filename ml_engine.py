@@ -160,6 +160,8 @@ class MLEngineManager:
         self.sample_rate = sample_rate
         self.mode: str = "dsp_stub"
         self.warmup_latency_ms: float = 0.0
+        self.weights_loaded: bool = False
+        self.whisper_enabled: bool = False
         self._stub_detector = StubDetector(sample_rate=sample_rate)
         self._detector: Any = self._stub_detector
 
@@ -199,15 +201,39 @@ class MLEngineManager:
                 except Exception as exc:
                     print(f"[ML Engine] Error loading from {candidate_file}: {exc}")
 
-        # 3. Instantiate detector or fallback
+        # 3. Instantiate detector with model weights and faster-whisper if present
         if real_detector_cls is not None:
+            # Check candidate model paths
+            model_path = None
+            for cand in ["deepfake_audio.pkl", "models/deepfake_audio.pkl"]:
+                if os.path.isfile(cand):
+                    model_path = cand
+                    break
+            if not model_path and settings.MODEL_DIR:
+                cand_dir = Path(settings.MODEL_DIR) / "deepfake_audio.pkl"
+                if cand_dir.is_file():
+                    model_path = str(cand_dir)
+
             try:
                 try:
-                    self._detector = real_detector_cls(sample_rate=self.sample_rate)
+                    self._detector = real_detector_cls(
+                        model_path=model_path,
+                        use_whisper=True,
+                    )
                 except TypeError:
-                    self._detector = real_detector_cls()
+                    try:
+                        self._detector = real_detector_cls(sample_rate=self.sample_rate)
+                    except TypeError:
+                        self._detector = real_detector_cls()
+
                 self.mode = "real_ml"
-                print(f"[ML Engine] Active engine mode: {self.mode}")
+                self.weights_loaded = getattr(self._detector, "clf", None) is not None
+                self.whisper_enabled = getattr(self._detector, "whisper", None) is not None
+
+                print(
+                    f"[ML Engine] Active engine mode: {self.mode} "
+                    f"(weights_loaded: {self.weights_loaded}, whisper_enabled: {self.whisper_enabled})"
+                )
                 return
             except Exception as exc:
                 print(f"[ML Engine] Failed to instantiate real detector: {exc}")
@@ -215,6 +241,8 @@ class MLEngineManager:
         # Fallback
         self._detector = self._stub_detector
         self.mode = "dsp_stub"
+        self.weights_loaded = False
+        self.whisper_enabled = False
         print(f"[ML Engine] Active engine mode: {self.mode}")
 
     def warmup(self) -> float:
@@ -238,10 +266,11 @@ class MLEngineManager:
         self,
         audio_np: np.ndarray,
         session_id: str,
-        timeout_sec: float = 1.2,
+        timeout_sec: float = 2.5,
     ) -> Tuple[Dict[str, Any], float]:
         """
-        Run inference off the event loop with strict timeout guardrail.
+        Run inference off the event loop with strict timeout guardrail (default 2.5s
+        to accommodate Faster-Whisper CPU transcription).
         Adapts signature, validates outputs against Pydantic schema,
         and falls back to DSP stub if timeout or error occurs.
 

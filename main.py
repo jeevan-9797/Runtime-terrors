@@ -146,6 +146,8 @@ async def health():
         "active_sessions": len(_active_sessions),
         "db_mode": "supabase" if db.is_using_supabase() else "in-memory",
         "ml_mode": ml_engine.mode,
+        "weights_loaded": ml_engine.weights_loaded,
+        "whisper_enabled": ml_engine.whisper_enabled,
         "warmup_latency_ms": ml_engine.warmup_latency_ms,
     }
 
@@ -424,7 +426,7 @@ async def call_stream(websocket: WebSocket, session_id: str):
                 window = ring.pop_window_if_ready()
                 if window is not None:
                     result, latency_ms = await ml_engine.analyze_window_safe(
-                        window, session_id, timeout_sec=1.2
+                        window, session_id, timeout_sec=2.5
                     )
 
                     chunk_id += 1
