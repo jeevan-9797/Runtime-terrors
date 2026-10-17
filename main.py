@@ -57,6 +57,15 @@ _live_sockets: Dict[str, WebSocket] = {}
 # Map session_id → active scenario injector for demo control.
 _scenario_injectors: Dict[str, ScenarioInjector] = {}
 
+# Map session_id → active CallRingBuffer
+_session_rings: Dict[str, CallRingBuffer] = {}
+
+# Map session_id → active WAV playback Task
+_wav_playback_tasks: Dict[str, asyncio.Task] = {}
+
+# Map session_id → bool indicating if audio or WAV playback is currently active
+_session_audio_active: Dict[str, bool] = {}
+
 
 # ═══════════════════════════════════════════════════════════════════════════
 # Composite risk computation
@@ -204,14 +213,120 @@ class ScenarioTriggerRequest(BaseModel):
     scenario: str
 
 
+async def play_cbi_wav_stream(
+    session_id: str,
+    wav_path: str = "audio_samples/02_cbi_digital_arrest.wav",
+) -> bool:
+    """
+    Stream 0.5-second (8000-sample / 16000-byte) chunks from audio_samples/02_cbi_digital_arrest.wav
+    through the session's CallRingBuffer and ml_engine live into the WebSocket and Supabase.
+    """
+    ws = _live_sockets.get(session_id)
+    if ws is None:
+        return False
+
+    ring = _session_rings.get(session_id)
+    if ring is None:
+        ring = CallRingBuffer(
+            sample_rate=16_000,
+            window_duration_sec=2.0,
+            stride_duration_sec=0.5,
+        )
+        _session_rings[session_id] = ring
+
+    # Flag audio as active so mock fallback loop is suppressed
+    _session_audio_active[session_id] = True
+
+    # Cancel previous playback task if still running
+    old_task = _wav_playback_tasks.get(session_id)
+    if old_task and not old_task.done():
+        old_task.cancel()
+
+    async def _stream_runner():
+        try:
+            from demo_replay import load_cbi_pcm_chunks
+            chunks = await asyncio.to_thread(load_cbi_pcm_chunks, wav_path)
+            chunk_counter = 0
+
+            for chunk in chunks:
+                if session_id not in _live_sockets:
+                    break
+                ring.append_pcm16_bytes(chunk)
+                window = ring.pop_window_if_ready()
+                if window is not None:
+                    chunk_counter += 1
+                    result, latency_ms = await ml_engine.analyze_window_safe(
+                        window, session_id, timeout_sec=3.0
+                    )
+                    am = result["acoustic_metrics"]
+                    sm = result["semantic_metrics"]
+                    risk = _compute_composite_risk(
+                        am["synthetic_probability"],
+                        sm["coercion_score"],
+                    )
+                    frame = TelemetryFrame(
+                        session_id=session_id,
+                        timestamp=round(time.time(), 2),
+                        chunk_id=chunk_counter,
+                        acoustic_metrics=AcousticMetrics(**am),
+                        semantic_metrics=SemanticMetrics(**sm),
+                        composite_risk=risk,
+                        processing_latency_ms=latency_ms,
+                    )
+                    try:
+                        await ws.send_text(frame.model_dump_json())
+                        # Asynchronous non-blocking Supabase / in-memory DB logging
+                        frame_dict = json.loads(frame.model_dump_json())
+                        asyncio.create_task(
+                            asyncio.to_thread(db.log_telemetry_if_risky, frame_dict)
+                        )
+                    except Exception:
+                        break
+                    await asyncio.sleep(0.5)
+        except asyncio.CancelledError:
+            pass
+        except Exception as exc:
+            print(f"[WAV Stream] Playback error on {session_id}: {exc}")
+        finally:
+            _session_audio_active[session_id] = False
+
+    task = asyncio.create_task(_stream_runner())
+    _wav_playback_tasks[session_id] = task
+    return True
+
+
 @app.post("/api/demo/trigger-scenario")
 async def trigger_scenario(req: ScenarioTriggerRequest):
     """
-    Inject a pre-recorded threat scenario into an active WebSocket session:
+    Inject a pre-recorded threat scenario or real WAV audio stream into an active WebSocket session:
       - NORMAL_CALL / SCENARIO_NORMAL
       - ELEVENLABS_DIGITAL_ARREST / SCENARIO_DIGITAL_ARREST
       - FAMILY_EMERGENCY_CLONE / SCENARIO_FAMILY_CLONE
+      - REAL_WAV_CBI / PLAY_REAL_WAV
     """
+    scenario_clean = req.scenario.upper().strip()
+    if scenario_clean in ("REAL_WAV_CBI", "PLAY_REAL_WAV", "CBI_REAL_WAV", "REAL_WAV"):
+        if req.session_id not in _live_sockets:
+            return {
+                "status": "session_not_found",
+                "session_id": req.session_id,
+                "active_sessions": list(_active_sessions),
+            }
+        started = await play_cbi_wav_stream(req.session_id)
+        return {
+            "status": "scenario_triggered",
+            "session_id": req.session_id,
+            "scenario": "REAL_WAV_CBI",
+            "playing_real_wav": started,
+            "details": "Streaming audio_samples/02_cbi_digital_arrest.wav with real LightGBM + Faster-Whisper",
+        }
+
+    # Cancel any running WAV playback when switching scenarios
+    playback_task = _wav_playback_tasks.get(req.session_id)
+    if playback_task and not playback_task.done():
+        playback_task.cancel()
+    _session_audio_active[req.session_id] = False
+
     if req.session_id in _scenario_injectors:
         _scenario_injectors[req.session_id].set_scenario(req.scenario)
         return {
@@ -376,6 +491,9 @@ async def call_stream(websocket: WebSocket, session_id: str):
         window_duration_sec=2.0,
         stride_duration_sec=0.5,
     )
+    _session_rings[session_id] = ring
+    _session_audio_active[session_id] = False
+
     injector = ScenarioInjector(session_id, scenario="NORMAL_CALL")
     _scenario_injectors[session_id] = injector
 
@@ -400,7 +518,7 @@ async def call_stream(websocket: WebSocket, session_id: str):
         nonlocal chunk_id
         try:
             while True:
-                if not audio_active:
+                if not audio_active and not _session_audio_active.get(session_id, False):
                     chunk_id += 1
                     injector.chunk_id = chunk_id
                     frame = injector.next_frame()
@@ -421,12 +539,18 @@ async def call_stream(websocket: WebSocket, session_id: str):
                 raw: bytes = message["bytes"]
                 audio_active = True
 
+                # If a synthetic WAV replay is running, cancel it so live mic takes over
+                running_wav = _wav_playback_tasks.get(session_id)
+                if running_wav and not running_wav.done():
+                    running_wav.cancel()
+                _session_audio_active[session_id] = True
+
                 ring.append_pcm16_bytes(raw)
 
                 window = ring.pop_window_if_ready()
                 if window is not None:
                     result, latency_ms = await ml_engine.analyze_window_safe(
-                        window, session_id, timeout_sec=2.5
+                        window, session_id, timeout_sec=3.0
                     )
 
                     chunk_id += 1
@@ -461,13 +585,29 @@ async def call_stream(websocket: WebSocket, session_id: str):
                     )
                     continue
 
-                if cmd.command in ("SIMULATE_SCAM", "SCENARIO_DIGITAL_ARREST"):
+                cmd_upper = cmd.command.upper().strip()
+                if cmd_upper in ("PLAY_REAL_WAV", "REAL_WAV_CBI", "CBI_REAL_WAV", "REAL_WAV"):
+                    audio_active = False
+                    await play_cbi_wav_stream(session_id)
+                elif cmd_upper in ("SIMULATE_SCAM", "SCENARIO_DIGITAL_ARREST"):
+                    running_wav = _wav_playback_tasks.get(session_id)
+                    if running_wav and not running_wav.done():
+                        running_wav.cancel()
+                    _session_audio_active[session_id] = False
                     audio_active = False
                     injector.set_scenario("ELEVENLABS_DIGITAL_ARREST")
-                elif cmd.command in ("SIMULATE_SAFE", "SCENARIO_NORMAL"):
+                elif cmd_upper in ("SIMULATE_SAFE", "SCENARIO_NORMAL"):
+                    running_wav = _wav_playback_tasks.get(session_id)
+                    if running_wav and not running_wav.done():
+                        running_wav.cancel()
+                    _session_audio_active[session_id] = False
                     audio_active = False
                     injector.set_scenario("NORMAL_CALL")
-                elif cmd.command == "SCENARIO_FAMILY_CLONE":
+                elif cmd_upper in ("SCENARIO_FAMILY_CLONE", "FAMILY_EMERGENCY_CLONE"):
+                    running_wav = _wav_playback_tasks.get(session_id)
+                    if running_wav and not running_wav.done():
+                        running_wav.cancel()
+                    _session_audio_active[session_id] = False
                     audio_active = False
                     injector.set_scenario("FAMILY_EMERGENCY_CLONE")
                 else:
@@ -483,6 +623,11 @@ async def call_stream(websocket: WebSocket, session_id: str):
         print(f"[WS] Session {session_id} ended: {exc}")
     finally:
         fallback_task.cancel()
+        playback_task = _wav_playback_tasks.pop(session_id, None)
+        if playback_task and not playback_task.done():
+            playback_task.cancel()
+        _session_rings.pop(session_id, None)
+        _session_audio_active.pop(session_id, None)
         _active_sessions.discard(session_id)
         _live_sockets.pop(session_id, None)
         _scenario_injectors.pop(session_id, None)

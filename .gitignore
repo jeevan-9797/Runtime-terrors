@@ -27,3 +27,6 @@ Thumbs.db
 # Model artifacts (explicitly tracked)
 !deepfake_audio.pkl
 !models/*.pkl
+
+# Binaries
+cloudflared.exe

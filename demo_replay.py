@@ -150,6 +150,8 @@ SCENARIOS: Dict[str, List[Dict[str, Any]]] = {
 def _canonical_scenario_name(scenario: str) -> str:
     """Map flexible aliases to canonical scenario keys."""
     upper = scenario.upper().strip()
+    if "REAL" in upper or "WAV" in upper:
+        return "REAL_WAV_CBI"
     if "DIGITAL" in upper or "ARREST" in upper or "SCAM" in upper:
         return "ELEVENLABS_DIGITAL_ARREST"
     if "FAMILY" in upper or "CLONE" in upper:
@@ -231,6 +233,46 @@ class ScenarioInjector:
 # ═══════════════════════════════════════════════════════════════════════════
 # Live .wav File Streamer
 # ═══════════════════════════════════════════════════════════════════════════
+
+def load_cbi_pcm_chunks(
+    wav_path: str = "audio_samples/02_cbi_digital_arrest.wav",
+    target_sample_rate: int = 16_000,
+    chunk_sec: float = 0.5,
+) -> List[bytes]:
+    """
+    Load the CBI digital arrest wav sample and slice it into 0.5-second
+    (8000-sample, 16000-byte) 16-bit PCM chunks for simulated real-time streaming.
+    """
+    path = Path(wav_path)
+    if not path.is_file():
+        alt_path = Path(__file__).parent / wav_path
+        if alt_path.is_file():
+            path = alt_path
+        else:
+            raise FileNotFoundError(f"Audio sample not found: {wav_path}")
+
+    import soundfile as sf
+    data, sr = sf.read(str(path), dtype="float32")
+
+    # Mono conversion
+    if data.ndim > 1:
+        data = np.mean(data, axis=1)
+
+    # Resample to target_sample_rate if needed
+    if sr != target_sample_rate:
+        import librosa
+        data = librosa.resample(data, orig_sr=sr, target_sr=target_sample_rate)
+
+    pcm16 = (np.clip(data, -1.0, 1.0) * 32767).astype(np.int16).tobytes()
+    chunk_bytes_size = int(target_sample_rate * chunk_sec) * 2
+
+    chunks: List[bytes] = []
+    for offset in range(0, len(pcm16), chunk_bytes_size):
+        chunk = pcm16[offset:offset + chunk_bytes_size]
+        if len(chunk) > 0:
+            chunks.append(chunk)
+    return chunks
+
 
 async def stream_wav_file_to_session(
     wav_path: str,
