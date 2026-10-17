@@ -31,7 +31,9 @@ from fastapi.responses import JSONResponse
 from audio_buffer import CallRingBuffer
 from config import settings
 import database as db
+from demo_replay import ScenarioInjector
 from ml_engine import ml_engine
+from pydantic import BaseModel
 from schemas import (
     AcousticMetrics,
     CompositeRisk,
@@ -51,6 +53,9 @@ _active_sessions: Set[str] = set()
 
 # Map session_id → live WebSocket so the quarantine endpoint can push events.
 _live_sockets: Dict[str, WebSocket] = {}
+
+# Map session_id → active scenario injector for demo control.
+_scenario_injectors: Dict[str, ScenarioInjector] = {}
 
 
 # ═══════════════════════════════════════════════════════════════════════════
@@ -102,7 +107,7 @@ def _compute_composite_risk(
 @asynccontextmanager
 async def _lifespan(app: FastAPI):
     db_mode = "Supabase" if db.is_using_supabase() else "in-memory"
-    print(f"Kavach-VoIP backend starting (Phase 4) ... [DB: {db_mode}]")
+    print(f"Kavach-VoIP backend starting (Phase 5) ... [DB: {db_mode}]")
     await asyncio.to_thread(ml_engine.warmup)
     yield
     print("Kavach-VoIP backend shutting down ...")
@@ -114,8 +119,8 @@ async def _lifespan(app: FastAPI):
 
 app = FastAPI(
     title="Kavach-VoIP",
-    description="Real-time Deepfake Voice & Vishing Call Firewall — Phase 4",
-    version="0.4.0",
+    description="Real-time Deepfake Voice & Vishing Call Firewall — Phase 5",
+    version="0.5.0",
     lifespan=_lifespan,
 )
 
@@ -190,6 +195,41 @@ async def quarantine_session(session_id: str):
         "session_id": session_id,
         "action": "MANUAL_QUARANTINE_DROP",
     }
+
+
+class ScenarioTriggerRequest(BaseModel):
+    session_id: str
+    scenario: str
+
+
+@app.post("/api/demo/trigger-scenario")
+async def trigger_scenario(req: ScenarioTriggerRequest):
+    """
+    Inject a pre-recorded threat scenario into an active WebSocket session:
+      - NORMAL_CALL / SCENARIO_NORMAL
+      - ELEVENLABS_DIGITAL_ARREST / SCENARIO_DIGITAL_ARREST
+      - FAMILY_EMERGENCY_CLONE / SCENARIO_FAMILY_CLONE
+    """
+    if req.session_id in _scenario_injectors:
+        _scenario_injectors[req.session_id].set_scenario(req.scenario)
+        return {
+            "status": "scenario_triggered",
+            "session_id": req.session_id,
+            "scenario": _scenario_injectors[req.session_id].scenario_name,
+        }
+    return {
+        "status": "session_not_found",
+        "session_id": req.session_id,
+        "active_sessions": list(_active_sessions),
+    }
+
+
+@app.post("/api/demo/seed")
+async def seed_demo():
+    """Trigger the Supabase demo seeder on demand."""
+    from seed_demo_data import seed_demo_database
+    res = await asyncio.to_thread(seed_demo_database)
+    return res
 
 
 # ═══════════════════════════════════════════════════════════════════════════
@@ -334,7 +374,9 @@ async def call_stream(websocket: WebSocket, session_id: str):
         window_duration_sec=2.0,
         stride_duration_sec=0.5,
     )
-    mock_engine = _MockTelemetryEngine(session_id)
+    injector = ScenarioInjector(session_id, scenario="NORMAL_CALL")
+    _scenario_injectors[session_id] = injector
+
     chunk_id = 0
     audio_active = False
 
@@ -351,15 +393,15 @@ async def call_stream(websocket: WebSocket, session_id: str):
             asyncio.to_thread(db.log_telemetry_if_risky, frame_dict)
         )
 
-    # ── Background: mock-engine fallback loop ─────────────────────────
+    # ── Background: scenario / fallback loop ──────────────────────────
     async def _mock_fallback_loop():
         nonlocal chunk_id
         try:
             while True:
                 if not audio_active:
                     chunk_id += 1
-                    mock_engine.chunk_id = chunk_id
-                    frame = mock_engine.next_frame()
+                    injector.chunk_id = chunk_id
+                    frame = injector.next_frame()
                     await websocket.send_text(frame.model_dump_json())
                     _fire_and_forget_log(frame)
                 await asyncio.sleep(settings.TELEMETRY_INTERVAL_SEC)
@@ -417,12 +459,15 @@ async def call_stream(websocket: WebSocket, session_id: str):
                     )
                     continue
 
-                if cmd.command == "SIMULATE_SCAM":
+                if cmd.command in ("SIMULATE_SCAM", "SCENARIO_DIGITAL_ARREST"):
                     audio_active = False
-                    mock_engine.set_mode("scam")
-                elif cmd.command == "SIMULATE_SAFE":
+                    injector.set_scenario("ELEVENLABS_DIGITAL_ARREST")
+                elif cmd.command in ("SIMULATE_SAFE", "SCENARIO_NORMAL"):
                     audio_active = False
-                    mock_engine.set_mode("safe")
+                    injector.set_scenario("NORMAL_CALL")
+                elif cmd.command == "SCENARIO_FAMILY_CLONE":
+                    audio_active = False
+                    injector.set_scenario("FAMILY_EMERGENCY_CLONE")
                 else:
                     await websocket.send_text(
                         json.dumps(
@@ -438,6 +483,7 @@ async def call_stream(websocket: WebSocket, session_id: str):
         fallback_task.cancel()
         _active_sessions.discard(session_id)
         _live_sockets.pop(session_id, None)
+        _scenario_injectors.pop(session_id, None)
         ring.reset()
         # End session in DB (non-blocking).
         asyncio.create_task(asyncio.to_thread(db.end_session, session_id))

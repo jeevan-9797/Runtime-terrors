@@ -83,7 +83,8 @@ def _sb_execute(table: str, operation: str, payload: dict | None = None,
         if operation == "insert":
             res = tbl.insert(payload).execute()
         elif operation == "upsert":
-            res = tbl.upsert(payload).execute()
+            on_conflict = filters.get("on_conflict", "session_id") if filters else "session_id"
+            res = tbl.upsert(payload, on_conflict=on_conflict).execute()
         elif operation == "update":
             q = tbl.update(payload)
             if filters:
@@ -105,8 +106,10 @@ def _sb_execute(table: str, operation: str, payload: dict | None = None,
         return res.data
     except Exception as exc:
         print(f"[DB] Supabase {operation} on '{table}' failed: {exc}")
-        _use_supabase = False
-        print("[DB] Switched to in-memory fallback for remainder of this run.")
+        err_msg = str(exc).lower()
+        if any(w in err_msg for w in ("connect", "timeout", "offline", "resolve", "unreachable")):
+            _use_supabase = False
+            print("[DB] Switched to in-memory fallback due to network/connection error.")
         return None
 
 
@@ -128,7 +131,7 @@ def start_session(
         "call_status": "ACTIVE",
     }
 
-    result = _sb_execute("call_sessions", "insert", payload=row)
+    result = _sb_execute("call_sessions", "upsert", payload=row)
     if result is None:
         # In-memory fallback
         _mem_sessions[session_id] = {
@@ -355,3 +358,34 @@ def get_session_details(session_id: str) -> Dict[str, Any]:
 def is_using_supabase() -> bool:
     """Return True if Supabase is the active backend."""
     return _use_supabase
+
+
+def seed_demo_session(
+    session_data: Dict[str, Any],
+    alerts: List[Dict[str, Any]],
+    actions: List[Dict[str, Any]],
+) -> bool:
+    """
+    Seed a historical demo session into Supabase (if not already existing)
+    and into the in-memory fallback store.
+    """
+    sid = session_data["session_id"]
+
+    # 1. Supabase persistence
+    if _use_supabase and _supabase_client is not None:
+        try:
+            existing = _sb_execute("call_sessions", "select", filters={"session_id": sid})
+            if existing is not None and len(existing) == 0:
+                _sb_execute("call_sessions", "insert", payload=session_data)
+                for a in alerts:
+                    _sb_execute("telemetry_alerts", "insert", payload=a)
+                for act in actions:
+                    _sb_execute("firewall_actions", "insert", payload=act)
+        except Exception as exc:
+            print(f"[DB] Supabase seed failed for {sid}: {exc}")
+
+    # 2. In-memory persistence (always available for fallback)
+    _mem_sessions[sid] = {"id": str(uuid.uuid4()), **session_data}
+    _mem_alerts[sid] = [{"id": str(uuid.uuid4()), **a} for a in alerts]
+    _mem_actions[sid] = [{"id": str(uuid.uuid4()), **act} for act in actions]
+    return True
