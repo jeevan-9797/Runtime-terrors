@@ -31,7 +31,7 @@ from fastapi.responses import JSONResponse
 from audio_buffer import CallRingBuffer
 from config import settings
 import database as db
-from detector_stub import VishingDetector
+from ml_engine import ml_engine
 from schemas import (
     AcousticMetrics,
     CompositeRisk,
@@ -51,9 +51,6 @@ _active_sessions: Set[str] = set()
 
 # Map session_id → live WebSocket so the quarantine endpoint can push events.
 _live_sockets: Dict[str, WebSocket] = {}
-
-# Single shared detector instance (stateless per-call, thread-safe).
-_detector = VishingDetector(sample_rate=16_000)
 
 
 # ═══════════════════════════════════════════════════════════════════════════
@@ -105,7 +102,8 @@ def _compute_composite_risk(
 @asynccontextmanager
 async def _lifespan(app: FastAPI):
     db_mode = "Supabase" if db.is_using_supabase() else "in-memory"
-    print(f"Kavach-VoIP backend starting (Phase 3) ... [DB: {db_mode}]")
+    print(f"Kavach-VoIP backend starting (Phase 4) ... [DB: {db_mode}]")
+    await asyncio.to_thread(ml_engine.warmup)
     yield
     print("Kavach-VoIP backend shutting down ...")
 
@@ -116,8 +114,8 @@ async def _lifespan(app: FastAPI):
 
 app = FastAPI(
     title="Kavach-VoIP",
-    description="Real-time Deepfake Voice & Vishing Call Firewall — Phase 3",
-    version="0.3.0",
+    description="Real-time Deepfake Voice & Vishing Call Firewall — Phase 4",
+    version="0.4.0",
     lifespan=_lifespan,
 )
 
@@ -142,6 +140,8 @@ async def health():
         "version": app.version,
         "active_sessions": len(_active_sessions),
         "db_mode": "supabase" if db.is_using_supabase() else "in-memory",
+        "ml_mode": ml_engine.mode,
+        "warmup_latency_ms": ml_engine.warmup_latency_ms,
     }
 
 
@@ -381,8 +381,8 @@ async def call_stream(websocket: WebSocket, session_id: str):
 
                 window = ring.pop_window_if_ready()
                 if window is not None:
-                    result = await asyncio.to_thread(
-                        _detector.analyze_window, window, session_id
+                    result, latency_ms = await ml_engine.analyze_window_safe(
+                        window, session_id, timeout_sec=1.2
                     )
 
                     chunk_id += 1
@@ -402,6 +402,7 @@ async def call_stream(websocket: WebSocket, session_id: str):
                         acoustic_metrics=AcousticMetrics(**am),
                         semantic_metrics=SemanticMetrics(**sm),
                         composite_risk=risk,
+                        processing_latency_ms=latency_ms,
                     )
                     await websocket.send_text(frame.model_dump_json())
                     _fire_and_forget_log(frame)

@@ -145,6 +145,9 @@ class TelemetryFrame(BaseModel):
     acoustic_metrics: AcousticMetrics
     semantic_metrics: SemanticMetrics
     composite_risk: CompositeRisk
+    processing_latency_ms: float = Field(
+        default=0.0, description="Processing latency of the inference window in milliseconds."
+    )
 
 
 # ── Inbound WebSocket commands ────────────────────────────────────────────
