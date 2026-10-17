@@ -106,9 +106,18 @@ class VishingDetector:
         if self.clf is not None:
             prob = float(self.clf.predict_proba([feat_vec])[0][1])
         else:
-            flatness_score = dsp["flatness"] * 8.5
-            jitter_penalty = 0.35 if dsp["jitter"] < 0.015 else 0.0
-            prob = min(0.96, max(0.08, flatness_score + jitter_penalty))
+            # Calibrated heuristic fallback for high-fidelity neural vocoders
+            # 1. ElevenLabs audio typically concentrates energy under 6.5kHz
+            cutoff_penalty = 0.30 if dsp["rolloff_hz"] < 6500 else 0.05
+            
+            # 2. Spectral flatness scaling
+            flatness_component = min(0.50, dsp["flatness"] * 25.0)
+            
+            # 3. Micro-tremor stability penalty (synthetic voices lack organic human vocal jitter)
+            jitter_penalty = 0.30 if dsp["jitter"] < 0.025 else 0.0
+            
+            # Combine components with a baseline floor
+            prob = min(0.96, max(0.08, 0.25 + cutoff_penalty + flatness_component + jitter_penalty))
 
         acoustic_metrics = {
             "deepfake_probability": round(prob, 2),
