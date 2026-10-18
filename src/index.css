@@ -1,0 +1,34 @@
+@import "tailwindcss";
+
+@layer base {
+  body {
+    font-family: 'Plus Jakarta Sans', system-ui, -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
+    background-color: #101820;
+    color: #F1F5F9;
+  }
+  code, pre, .font-mono {
+    font-family: 'JetBrains Mono', monospace;
+    font-variant-numeric: tabular-nums;
+  }
+}
+
+/* Subtle, restrained alert state without neon glow */
+.risk-critical-border {
+  border-color: #D95765 !important;
+}
+
+/* Precision scrollbars */
+::-webkit-scrollbar {
+  width: 5px;
+  height: 5px;
+}
+::-webkit-scrollbar-track {
+  background: #101820;
+}
+::-webkit-scrollbar-thumb {
+  background: #263443;
+  border-radius: 2px;
+}
+::-webkit-scrollbar-thumb:hover {
+  background: #35B9D0;
+}

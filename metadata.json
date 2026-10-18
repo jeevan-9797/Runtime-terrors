@@ -1,0 +1,6 @@
+{
+  "name": "Kavach-VoIP: Real-Time Scam Detection",
+  "description": "Real-time VoIP cybersecurity monitoring dashboard with live WebSocket call streaming, threat anomaly detection, and developer simulation controls.",
+  "requestFramePermissions": [],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}
