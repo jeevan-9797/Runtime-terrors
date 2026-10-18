@@ -38,8 +38,12 @@ class Settings:
     )
 
     # ── Supabase (Phase 2+ persistence) ──────────────────────────────
-    SUPABASE_URL: str = os.getenv("SUPABASE_URL", "")
-    SUPABASE_KEY: str = os.getenv("SUPABASE_KEY", "")
+    SUPABASE_URL: str = os.getenv(
+        "SUPABASE_URL", "https://hdepvllfalsxwsoinqvw.supabase.co"
+    )
+    SUPABASE_KEY: str = os.getenv(
+        "SUPABASE_KEY", "sb_publishable_eGTRXEhlY1DoRgqtqj0CDA_Zdka2ZOR"
+    )
 
     # ── Future: ML model paths ────────────────────────────────────────
     MODEL_DIR: str = os.getenv("KAVACH_MODEL_DIR", "./models")
