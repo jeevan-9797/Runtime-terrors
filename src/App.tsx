@@ -285,23 +285,26 @@ export default function App() {
         return;
       }
 
-      // 2. Fallback 1: Probe local backend if running at http://localhost:8000
-      const localResult = await probeLocalhost();
-      if (localResult.ok && localResult.data) {
-        setBackendLatency(localResult.latencyMs);
-        setBackendHealth('online');
-        setBackendHealthData(localResult.data);
-        setActiveBackendMode('localhost');
-        setIsEdgeMode(false);
-        setHealthUrl('http://localhost:8000/health');
-        setWsUrl(
-          BACKEND_CONFIG.WS_URL_FOR_SESSION(callSession.sessionId).replace(
-            'wss://kavach-n5na.onrender.com',
-            'ws://localhost:8000'
-          )
-        );
-        appendLog('SYS', 'Auto-failover: Seamlessly connected to local backend (http://localhost:8000)');
-        return;
+      // 2. Fallback 1: Probe local backend if running at http://localhost:8000 (skip on https: origins)
+      const isHttps = typeof window !== 'undefined' && window.location.protocol === 'https:';
+      if (!isHttps) {
+        const localResult = await probeLocalhost();
+        if (localResult.ok && localResult.data) {
+          setBackendLatency(localResult.latencyMs);
+          setBackendHealth('online');
+          setBackendHealthData(localResult.data);
+          setActiveBackendMode('localhost');
+          setIsEdgeMode(false);
+          setHealthUrl('http://localhost:8000/health');
+          setWsUrl(
+            BACKEND_CONFIG.WS_URL_FOR_SESSION(callSession.sessionId).replace(
+              'wss://kavach-n5na.onrender.com',
+              'ws://localhost:8000'
+            )
+          );
+          appendLog('SYS', 'Auto-failover: Seamlessly connected to local backend (http://localhost:8000)');
+          return;
+        }
       }
 
       // 3. If neither responded yet
@@ -314,15 +317,6 @@ export default function App() {
     [callSession.sessionId, isEdgeMode, appendLog]
   );
 
-  // Manual Refresh Button: immediately re-triggers /health and WebSocket connection
-  const handleManualRefresh = useCallback(async () => {
-    appendLog('SYS', 'Operator triggered manual health check & stream reconnection.');
-    setBackendHealth('checking');
-    await performHealthCheck(true);
-    connectWs();
-  }, [performHealthCheck, connectWs, appendLog]);
-
-
   // WebSocket Connection Handler
   const connectWs = useCallback(() => {
     if (wsRef.current) {
@@ -331,6 +325,14 @@ export default function App() {
       } catch {
         // ignore
       }
+    }
+
+    // Security check: Block insecure ws:// connection if page is served over https:
+    const isHttpsOrigin = typeof window !== 'undefined' && window.location.protocol === 'https:';
+    if (isHttpsOrigin && wsUrl.startsWith('ws://')) {
+      appendLog('SYS', `Blocked insecure ws:// connection on https: origin (${wsUrl}). Mixed Content protected.`, true);
+      setWsStatus('error');
+      return;
     }
 
     setWsStatus('connecting');
@@ -488,6 +490,14 @@ export default function App() {
       appendLog('SYS', `Failed to construct WebSocket: ${String(e)}`, true);
     }
   }, [wsUrl, appendLog, applySafeState, applyScamAlertState]);
+
+  // Manual Refresh Button: immediately re-triggers /health and WebSocket connection
+  const handleManualRefresh = useCallback(async () => {
+    appendLog('SYS', 'Operator triggered manual health check & stream reconnection.');
+    setBackendHealth('checking');
+    await performHealthCheck(true);
+    connectWs();
+  }, [performHealthCheck, connectWs, appendLog]);
 
   // Zero-Downtime Demo Guarantee: Activate Edge Mode if backend takes > 6s to wake up
   useEffect(() => {

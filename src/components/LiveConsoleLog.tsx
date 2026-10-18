@@ -19,7 +19,7 @@ export const LiveConsoleLog: React.FC<LiveConsoleLogProps> = ({ logs, onClearLog
     }
   }, [logs]);
 
-  const filteredLogs = logs.filter((log) => {
+  const filteredLogs = (logs || []).filter((log) => {
     if (filter === 'ALL') return true;
     if (filter === 'IN') return log.direction === 'IN';
     if (filter === 'OUT') return log.direction === 'OUT';

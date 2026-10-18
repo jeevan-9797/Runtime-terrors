@@ -74,6 +74,11 @@ export async function checkBackendHealth(targetUrl: string = BACKEND_CONFIG.HEAL
  * Fast probe to check if a local backend is running at http://localhost:8000
  */
 export async function probeLocalhost(): Promise<HealthCheckResult> {
+  // Never attempt insecure HTTP fetch from an HTTPS origin (Mixed Content protection)
+  if (typeof window !== 'undefined' && window.location.protocol === 'https:') {
+    return { ok: false, latencyMs: 0 };
+  }
+
   const start = performance.now();
   try {
     const controller = new AbortController();

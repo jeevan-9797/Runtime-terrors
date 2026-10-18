@@ -32,7 +32,7 @@ export const CallCard: React.FC<CallCardProps> = ({
   micErrorMessage,
 }) => {
   const [isMuted, setIsMuted] = useState(false);
-  const [seconds, setSeconds] = useState(session.durationSeconds);
+  const [seconds, setSeconds] = useState(session?.durationSeconds ?? 0);
   const transcriptEndRef = useRef<HTMLDivElement | null>(null);
 
   // Active call duration timer
@@ -79,7 +79,7 @@ export const CallCard: React.FC<CallCardProps> = ({
           <div>
             <div className="flex items-center gap-2">
               <span className="font-mono text-sm font-bold text-[#F1F5F9] tracking-tight">
-                {session.callerNumber}
+                {session?.callerNumber || '+91-98765-43210'}
               </span>
               <span
                 className="text-[10px] font-mono font-medium px-2 py-0.5 rounded border"
@@ -97,9 +97,9 @@ export const CallCard: React.FC<CallCardProps> = ({
               </span>
             </div>
             <div className="flex items-center gap-2 text-xs text-[#AAB7C4] mt-0.5">
-              <span>{session.callerName}</span>
+              <span>{session?.callerName || 'Unknown Caller'}</span>
               <span aria-hidden="true">·</span>
-              <span className="font-mono">{session.gateway}</span>
+              <span className="font-mono">{session?.gateway || 'SIP Gateway'}</span>
             </div>
           </div>
         </div>
@@ -161,7 +161,7 @@ export const CallCard: React.FC<CallCardProps> = ({
 
         {/* Scrollable Dialogue Container */}
         <div className="flex-1 bg-[#101820] border border-[#263443] rounded p-3 overflow-y-auto space-y-2.5 max-h-[260px] text-xs">
-          {transcript.map((item, idx) => {
+          {(transcript || []).map((item, idx) => {
             const flagged = item.isFlagged || item.flagged;
             return (
               <div

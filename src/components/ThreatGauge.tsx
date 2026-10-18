@@ -34,7 +34,7 @@ export const ThreatGauge: React.FC<ThreatGaugeProps> = ({
   isStreamActive = true,
 }) => {
   const isAlert = securityState === 'scam';
-  const targetScore = metrics.threatScore;
+  const targetScore = metrics?.threatScore ?? 8;
 
   // View Mode: 'timeline' (Previous Graph - Default) or 'telemetry' (Continuous Strip-Chart)
   const [viewMode, setViewMode] = useState<'timeline' | 'telemetry'>('timeline');
@@ -764,7 +764,7 @@ export const ThreatGauge: React.FC<ThreatGaugeProps> = ({
               className="text-base font-bold tabular-nums"
               style={{ color: isAlert ? '#D95765' : '#F1F5F9' }}
             >
-              {isAlert ? 'Critical (89%)' : `${metrics.voiceStress}% (Low)`}
+              {isAlert ? 'Critical (89%)' : `${metrics?.voiceStress ?? 14}% (Low)`}
             </span>
           </div>
           <p className="text-[10px] text-[#AAB7C4] mt-1 line-clamp-1">
@@ -783,7 +783,7 @@ export const ThreatGauge: React.FC<ThreatGaugeProps> = ({
               className="text-base font-bold tabular-nums"
               style={{ color: isAlert ? '#D95765' : '#F1F5F9' }}
             >
-              {isAlert ? '82% Prob' : `${metrics.syntheticVoiceProb}% Prob`}
+              {isAlert ? '82% Prob' : `${metrics?.syntheticVoiceProb ?? 4}% Prob`}
             </span>
           </div>
           <p className="text-[10px] text-[#AAB7C4] mt-1 line-clamp-1">
@@ -834,14 +834,14 @@ export const ThreatGauge: React.FC<ThreatGaugeProps> = ({
       </div>
 
       {/* Flagged Suspicious Patterns (Conditional) */}
-      {metrics.flaggedKeywords && metrics.flaggedKeywords.length > 0 && (
+      {metrics?.flaggedKeywords && metrics.flaggedKeywords.length > 0 && (
         <div className="mt-4 pt-3 border-t border-[#263443]">
           <div className="flex items-center gap-2 mb-2 text-xs font-semibold text-[#D95765]">
             <AlertTriangle className="w-3.5 h-3.5" />
             <span>Flagged Coercion & Social Engineering Patterns ({metrics.flaggedKeywords.length}):</span>
           </div>
           <div className="flex flex-wrap gap-2">
-            {metrics.flaggedKeywords.map((kw, i) => (
+            {(metrics.flaggedKeywords || []).map((kw, i) => (
               <span
                 key={i}
                 className="px-2.5 py-1 text-xs font-mono font-medium rounded bg-[#D95765]/10 text-[#F1F5F9] border border-[#D95765]/30 flex items-center gap-1.5"
