@@ -106,10 +106,6 @@ def _sb_execute(table: str, operation: str, payload: dict | None = None,
         return res.data
     except Exception as exc:
         print(f"[DB] Supabase {operation} on '{table}' failed: {exc}")
-        err_msg = str(exc).lower()
-        if any(w in err_msg for w in ("connect", "timeout", "offline", "resolve", "unreachable")):
-            _use_supabase = False
-            print("[DB] Switched to in-memory fallback due to network/connection error.")
         return None
 
 
