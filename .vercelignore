@@ -1,0 +1,15 @@
+# Python / ML Files (Prevent Vercel from detecting Python runtime)
+*.py
+*.pkl
+*.wav
+*.mp3
+requirements.txt
+models/
+audio_samples/
+venv/
+.venv/
+__pycache__/
+Procfile
+render.yaml
+cloudflared.exe
+schema.sql
