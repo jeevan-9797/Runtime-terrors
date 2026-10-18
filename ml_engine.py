@@ -39,19 +39,26 @@ from schemas import (
 )
 
 
-def _adapt_and_invoke(detector: Any, audio_np: np.ndarray, session_id: str) -> Any:
+def _adapt_and_invoke(detector: Any, audio_np: np.ndarray, session_id: str, transcript_override: str = "") -> Any:
     """
     Inspect the exact signature of detector.analyze_window and invoke accordingly:
       - (audio_chunk, session_id) if session_id is accepted
+      - (audio_chunk, transcript_override) if accepted
       - (audio_chunk) otherwise
     """
     sig = inspect.signature(detector.analyze_window)
     param_names = list(sig.parameters.keys())
 
+    kwargs = {}
+    if "transcript_override" in param_names and transcript_override:
+        kwargs["transcript_override"] = transcript_override
+
     if "session_id" in param_names:
-        return detector.analyze_window(audio_np, session_id=session_id)
+        return detector.analyze_window(audio_np, session_id=session_id, **kwargs)
     elif len(param_names) >= 2 and param_names[1] not in ("transcript_override", "kwargs"):
-        return detector.analyze_window(audio_np, session_id)
+        return detector.analyze_window(audio_np, session_id, **kwargs)
+    elif kwargs:
+        return detector.analyze_window(audio_np, **kwargs)
     else:
         return detector.analyze_window(audio_np)
 
@@ -245,7 +252,10 @@ class MLEngineManager:
 
                 self.mode = "real_ml"
                 self.weights_loaded = getattr(self._detector, "clf", None) is not None
-                self.whisper_enabled = getattr(self._detector, "whisper", None) is not None
+                self.whisper_enabled = bool(
+                    getattr(self._detector, "whisper_enabled", True)
+                    or getattr(self._detector, "whisper", None) is not None
+                )
 
                 print(
                     f"[ML Engine] Active engine mode: {self.mode} "
@@ -271,7 +281,8 @@ class MLEngineManager:
         dummy_audio = np.zeros(int(self.sample_rate * 2.0), dtype=np.float32)
         start_t = time.perf_counter()
         try:
-            raw = _adapt_and_invoke(self._detector, dummy_audio, session_id="warmup")
+            # Pass transcript_override="warmup" to bypass Whisper transcription during silence warmup
+            raw = _adapt_and_invoke(self._detector, dummy_audio, session_id="warmup", transcript_override="warmup")
             _normalize_detector_output(raw, dummy_audio)
         except Exception as exc:
             print(f"[ML Engine] Warmup warning: {exc}")

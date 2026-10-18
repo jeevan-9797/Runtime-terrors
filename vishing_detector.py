@@ -54,24 +54,35 @@ class VishingDetector:
             else:
                 print(f"[VishingDetector] Default artifact '{DEFAULT_MODEL_PATH}' not found. Using heuristic fallback.")
 
-        # 2. Integrate faster-whisper directly (tiny.en, int8 CPU quantization)
+        # 2. Integrate faster-whisper directly with lazy-loading (protects Render 512MB RAM ceiling)
         self.whisper = None
-        if use_whisper:
-            try:
-                from faster_whisper import WhisperModel
-                # In cloud/Render containers (or when WHISPER_THREADS is set), limit threads to 2
-                is_cloud = bool(os.getenv("RENDER") or os.getenv("PORT") or os.name != "nt")
-                default_threads = 2 if is_cloud else min(4, os.cpu_count() or 2)
-                threads = cpu_threads or int(os.getenv("WHISPER_THREADS", str(default_threads)))
-                self.whisper = WhisperModel(
-                    whisper_model_size,
-                    device="cpu",
-                    compute_type="int8",
-                    cpu_threads=threads
-                )
-                print(f"[VishingDetector] Loaded faster-whisper ({whisper_model_size}, int8 CPU, threads={threads}).")
-            except Exception as e:
-                print(f"[Warning] Faster-Whisper could not be loaded: {e}")
+        self.use_whisper = use_whisper
+        self.whisper_enabled = use_whisper
+        self._whisper_model_size = whisper_model_size
+        self._cpu_threads = cpu_threads
+
+        # On local machines, load eagerly; on cloud/Render containers, lazy-load on demand
+        is_cloud = bool(os.getenv("RENDER") or os.getenv("PORT") or os.name != "nt")
+        if use_whisper and not is_cloud:
+            self._ensure_whisper()
+
+    def _ensure_whisper(self) -> None:
+        if self.whisper is not None or not self.use_whisper:
+            return
+        try:
+            from faster_whisper import WhisperModel
+            is_cloud = bool(os.getenv("RENDER") or os.getenv("PORT") or os.name != "nt")
+            default_threads = 2 if is_cloud else min(4, os.cpu_count() or 2)
+            threads = self._cpu_threads or int(os.getenv("WHISPER_THREADS", str(default_threads)))
+            self.whisper = WhisperModel(
+                self._whisper_model_size,
+                device="cpu",
+                compute_type="int8",
+                cpu_threads=threads
+            )
+            print(f"[VishingDetector] Loaded faster-whisper ({self._whisper_model_size}, int8 CPU, threads={threads}).")
+        except Exception as e:
+            print(f"[Warning] Faster-Whisper could not be loaded: {e}")
 
     def extract_features(self, y: np.ndarray, sr: int = 16000) -> Tuple[np.ndarray, dict]:
         # 1. 40 MFCCs + Deltas (40 + 40 = 80 features)

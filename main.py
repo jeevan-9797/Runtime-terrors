@@ -123,7 +123,8 @@ def _compute_composite_risk(
 async def _lifespan(app: FastAPI):
     db_mode = "Supabase" if db.is_using_supabase() else "in-memory"
     print(f"Kavach-VoIP backend starting (Phase 5) ... [DB: {db_mode}]")
-    await asyncio.to_thread(ml_engine.warmup)
+    # Non-blocking background warmup: do NOT await synchronously so Uvicorn binds immediately and /health responds in <50ms!
+    asyncio.create_task(asyncio.to_thread(ml_engine.warmup))
     yield
     print("Kavach-VoIP backend shutting down ...")
 

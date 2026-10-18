@@ -31,13 +31,13 @@ export interface HealthCheckResult {
 
 /**
  * Fetch health status from GET /health
- * Validates response.ok and parses health data
+ * Validates response.ok and parses health data with a generous 15-second timeout for cloud cold starts
  */
 export async function checkBackendHealth(targetUrl: string = BACKEND_CONFIG.HEALTH_URL): Promise<HealthCheckResult> {
   const start = performance.now();
   try {
     const controller = new AbortController();
-    const timeout = setTimeout(() => controller.abort(), 6000);
+    const timeout = setTimeout(() => controller.abort(), 15000);
     const res = await fetch(targetUrl, {
       signal: controller.signal,
       cache: 'no-store',
@@ -67,6 +67,29 @@ export async function checkBackendHealth(targetUrl: string = BACKEND_CONFIG.HEAL
       latencyMs: latency,
       error: err instanceof Error ? err.message : String(err),
     };
+  }
+}
+
+/**
+ * Fast probe to check if a local backend is running at http://localhost:8000
+ */
+export async function probeLocalhost(): Promise<HealthCheckResult> {
+  const start = performance.now();
+  try {
+    const controller = new AbortController();
+    const timeout = setTimeout(() => controller.abort(), 1800);
+    const res = await fetch('http://localhost:8000/health', {
+      signal: controller.signal,
+      cache: 'no-store',
+      headers: { Accept: 'application/json' },
+    });
+    clearTimeout(timeout);
+    const latency = Math.round(performance.now() - start);
+    if (!res.ok) return { ok: false, latencyMs: latency };
+    const data = await res.json();
+    return { ok: true, latencyMs: latency, data };
+  } catch {
+    return { ok: false, latencyMs: Math.round(performance.now() - start) };
   }
 }
 
